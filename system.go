@@ -4,10 +4,29 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+type SHELLEXECUTEINFO struct {
+	cbSize       uint32
+	fMask        uint32
+	hwnd         uintptr
+	lpVerb       *uint16
+	lpFile       *uint16
+	lpParameters *uint16
+	lpDirectory  *uint16
+	nShow        int32
+	hInstApp     uintptr
+	lpIDList     uintptr
+	lpClass      *uint16
+	hkeyClass    uintptr
+	dwHotKey     uint32
+	hIcon        uintptr
+	hProcess     uintptr
+}
 
 func main() {
 	if len(os.Args) != 2 {
@@ -17,13 +36,18 @@ func main() {
 
 	programPath := os.Args[1]
 
-	err := createProcessAsSystem(programPath)
+	err := createProcessAsNT(programPath)
 	if err != nil {
-		log.Fatalf("Failed to create process as NT Authority/System: %v", err)
+		log.Printf("Failed to create process as NT Authority/System: %v", err)
+
+		err = runAsAdmin(programPath)
+		if err != nil {
+			log.Fatalf("Failed to run program as administrator: %v", err)
+		}
 	}
 }
 
-func createProcessAsSystem(programPath string) error {
+func createProcessAsNT(programPath string) error {
 	// Get the primary token of the local system account
 	var systemToken windows.Token
 	err := windows.WTSQueryUserToken(windows.WTSGetActiveConsoleSessionId(), &systemToken)
@@ -53,11 +77,11 @@ func createProcessAsSystem(programPath string) error {
 
 	// Set the process startup information
 	startupInfo := windows.StartupInfo{
-		Cb:          uint32(unsafe.Sizeof(windows.StartupInfo{})),
-		Desktop:     windows.StringToUTF16Ptr("Winsta0\\Default"),
-		Title:       windows.StringToUTF16Ptr(""),
-		Flags:       windows.STARTF_USESHOWWINDOW,
-		ShowWindow:  windows.SW_SHOW,
+		Cb:         uint32(unsafe.Sizeof(windows.StartupInfo{})),
+		Desktop:    windows.StringToUTF16Ptr("Winsta0\\Default"),
+		Title:      windows.StringToUTF16Ptr(""),
+		Flags:      windows.STARTF_USESHOWWINDOW,
+		ShowWindow: windows.SW_SHOW,
 	}
 
 	// Set the process information
@@ -72,6 +96,37 @@ func createProcessAsSystem(programPath string) error {
 	// Close the process and thread handles
 	windows.CloseHandle(processInfo.Process)
 	windows.CloseHandle(processInfo.Thread)
+
+	return nil
+}
+
+func runAsAdmin(programPath string) error {
+	// Load shell32.dll library
+	shell32, err := syscall.LoadDLL("shell32.dll")
+	if err != nil {
+		return err
+	}
+	defer shell32.Release()
+
+	// Get the pointer to the ShellExecuteEx function
+	shellExecuteEx, err := shell32.FindProc("ShellExecuteExW")
+	if err != nil {
+		return err
+	}
+
+	// Prepare parameters for ShellExecuteEx function
+	sei := &SHELLEXECUTEINFO{
+		cbSize: uint32(unsafe.Sizeof(SHELLEXECUTEINFO{})),
+		lpVerb: syscall.StringToUTF16Ptr("runas"),
+		lpFile: syscall.StringToUTF16Ptr(programPath),
+		nShow:  syscall.SW_NORMAL,
+	}
+
+	// Call the ShellExecuteEx function to run the program as administrator
+	ret, _, err := shellExecuteEx.Call(uintptr(unsafe.Pointer(sei)))
+	if ret == 0 {
+		return err
+	}
 
 	return nil
 }
